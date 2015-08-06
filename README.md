@@ -5,6 +5,7 @@
   php-rdkafka基于kafka c++ library(https://github.com/edenhill/librdkafka)
 
   example:
+  	
   	send:
 
   	$kafka = new ComKafka('kafka_host_name','topic_name','producer');
