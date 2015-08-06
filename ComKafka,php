@@ -1,0 +1,189 @@
+<?php
+/*
+  Comkafka.php基于https://github.com/arnaud-lb/php-rdkafka扩展进行封装
+  php-rdkafka基于kafka c++ library(https://github.com/edenhill/librdkafka)
+
+  example:
+  	send:
+  			$kafka = new ComKafka('kafka_host_name','topic_name','producer');
+			$kafka -> produce($msg);//默认随机发送到各partition
+			//$kafka -> produce($msg,$partition_id);//指定partition_id发送,需>=0且存在该partition
+			//$kafka -> produce($msg,ComKafka::PRODUCER_PARTITION_MODE_CONSISTENT,$key);//使用consistent hashing算法进行发送，相同key下保序
+	
+	consumer:
+			$kafka = new ComKafka('kafka_host_name','topic_name','consumer');
+			while(true){
+				$res = $kafka -> consume($partition);
+				if($res){
+					echo $res;
+				}
+			}
+		
+		
+  @todo monitor class
+  @author hujinglin-ps@360.cn
+*/
+class ComKafka{
+
+	CONST PRODUCER_PARTITION_MODE_CONSISTENT = -1;
+	CONST PRODUCER_PARTITION_MODE_RANDOM	 = -2;
+
+	CONST CONSUMER_MESSAGE_MAX_BYTES 		 = 1048576;
+	CONST CONSUMER_MESSAGE_AUTO_COMMIT_MS 	 = 60000;
+	CONST CONSUMER_MESSAGE_FETCH_TIMEOUT_MS  = 1000;
+
+	private $topic_name;
+
+	private $producer;
+	private $producer_topic;
+
+	private $consumer;
+
+	function __construct($host_name,$topic_name,$identity){
+
+		$host_conf = YII::app()->param($host);
+
+		if($conf == '' || $topic_name  == '' || $identity  == ''){
+			echo "error : no init param";
+			exit;
+		}
+
+		if(!in_array($identity,array('producer','consumer'))){
+			echo "error : wrong identity";
+			exit;
+		}
+
+		$this->topic_name = $topic_name;
+
+		//初始化全局配置
+		$rd_conf = new RdKafka\Conf();
+		$rd_conf -> set('metadata.broker.list',$host_conf);
+		$rd_conf -> set('socket.keepalive.enable',true);
+		$rd_conf -> set('log_level',LOG_DEBUG);//Logging level (syslog(3) levels)
+
+		switch ($identity) {
+
+			case 'producer':
+				$rd_conf -> set('compression.codec','none');//Compression codec to use for compressing message sets: none, gzip or snappy;default none
+				$this->producer = new RdKafka\Producer($rd_conf);
+				break;
+
+			case 'consumer':
+				$rd_conf -> set('fetch.message.max.bytes',self::CONSUMER_MESSAGE_MAX_BYTES);
+				$this->consumer = new RdKafka\Consumer($rd_conf);
+				break;
+		}
+
+	}
+
+//-----------------------------------produce start-----------------------------------
+
+	public function produce($message, $partition_mode = self::PRODUCER_PARTITION_MODE_RANDOM , $key = null){
+
+		if(!isset($this->produce) || trim($message) == '' || !is_numeric($partition) || $partition < -2 ){
+			echo "error : produce wrong param";
+			return false;
+		}
+
+		switch ($partition_mode) {
+			//一致性hash发送消息
+			case self::PRODUCER_PARTITION_MODE_CONSISTENT:
+				if(isset($key) && $key !=''){
+					$this->getProducerTopic('consistent')-> produce(RD_KAFKA_PARTITION_UA, 0, $message,$key);
+				}else{
+					echo "error : produce no key";
+					return false;
+				}
+				break;
+
+			//随机发送
+			case self::PRODUCER_PARTITION_MODE_RANDOM:
+				 $this->getProducerTopic()-> produce(RD_KAFKA_PARTITION_UA, 0, $message,$key);
+				break;
+			
+			//指定partition发送
+			default:
+				$this->getProducerTopic()-> produce($partition, 0, $message,$key);
+				break;
+		}
+
+		return true;
+	}
+
+	private function getProducerTopic($mode = ''){
+
+		if(!$this->producer_topic){
+			if(!isset($this->producer)){
+				echo "error : produce wrong identity";
+				exit;
+			}
+			if($mode == 'consistent'){
+				$rd_topic_conf = new RdKafka\TopicConf();
+				$rd_topic_conf -> setPartitioner(RD_KAFKA_MSG_PARTITIONER_CONSISTENT);
+				$this->producer_topic = $this->producer->newTopic($this->topic_name,$rd_topic_conf);
+			}else{
+				$this->producer_topic = $this->producer->newTopic($this->topic_name);
+			}
+		}
+		return $this->producer_topic;
+	}
+//-----------------------------------produce end-----------------------------------
+
+
+//-----------------------------------consume start-----------------------------------
+
+	//@todo 存储方式：local_file，broker，zk
+	//@todo offset方式：存储offset，指定offset
+	public function consume($partition){
+
+		if(!isset($this->consumer) || !is_numeric($partition)  || $partition < 0 ){
+			echo "error : consume wrong param";
+			return false;
+		}
+
+		$msg = $this->getConsumerTopic($partition)->consume($partition, self::CONSUMER_MESSAGE_FETCH_TIMEOUT_MS);
+
+		if ($msg->err) {
+			echo "error : consumer ". $msg->errstr();
+	        return false;
+	    } else {
+	        retrun $msg->payload;
+	    }
+
+	}	
+
+	private function getConsumerTopic($partition,$mode = ''){
+
+		if(!$this->comsumer_topic){
+			if(!isset($this->consumer)){
+				echo "error : comsumer wrong identity";
+				exit;
+			}
+
+			$rd_topic_conf = new RdKafka\TopicConf();
+			$rd_topic_conf -> set('group.id','????');//@todo
+			$rd_topic_conf -> set('auto.commit.interval.ms',self::CONSUMER_MESSAGE_AUTO_COMMIT_MS);
+			$rd_topic_conf -> set('auto.offset.reset','smallest');
+			$rd_topic_conf -> set('offset.store.method','broker');
+
+			if($mode == 'consistent'){
+
+				
+			}else{
+
+			}
+
+			$this->consumer_topic = $this->consumer->newTopic($this->topic_name,$rd_topic_conf);
+
+			$this->consumer_topic -> consumeStart(0, RD_KAFKA_OFFSET_STORED);
+
+
+		}
+		return $this->comsumer_topic;
+	}
+
+//-----------------------------------consume end-----------------------------------
+
+}
+
+?>
