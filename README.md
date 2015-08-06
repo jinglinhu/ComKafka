@@ -6,6 +6,7 @@
 
   example:
   	send:
+
   	$kafka = new ComKafka('kafka_host_name','topic_name','producer');
   	
   	$kafka -> produce($msg);//默认随机发送到各partition
