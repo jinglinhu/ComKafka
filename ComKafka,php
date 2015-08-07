@@ -12,7 +12,7 @@
         $kafka = new ComKafka($topic_name,'producer','kafka_local');
         for ($i=0; $i < 10000; $i++) { 
             $msg = 'message:'.$i;
-            $kafka -> produce($msg);//指定partition_id(int)发送,需>=0且存在该partition
+            $kafka -> produce($msg);
         }
         //$kafka -> produce($msg);//默认，一次链接中随机发送到各partition
         //$kafka -> produce($msg,$partition_id);//指定partition_id(int)发送,需>=0且存在该partition
