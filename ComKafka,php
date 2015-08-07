@@ -21,7 +21,6 @@
 		
 
   @todo monitor class
-  @author hujinglin-ps@360.cn
 */
 class ComKafka{
 
