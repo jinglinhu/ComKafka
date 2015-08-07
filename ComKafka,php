@@ -4,160 +4,266 @@
   php-rdkafka基于kafka c++ library(https://github.com/edenhill/librdkafka)
 
   example:
-  	send:
-  			$kafka = new ComKafka('kafka_host_name','topic_name','producer');
-			$kafka -> produce($msg);//默认随机发送到各partition
-			//$kafka -> produce($msg,$partition_id);//指定partition_id发送,需>=0且存在该partition
-			//$kafka -> produce($msg,ComKafka::PRODUCER_PARTITION_MODE_CONSISTENT,$key);//使用consistent hashing算法进行发送，相同key下保序
-	
-	consumer:
-			$kafka = new ComKafka('kafka_host_name','topic_name','consumer');
-			while(true){
-				$res = $kafka -> consume($partition);
-				if($res){
-					echo $res;
-				}
-			}
-		
+
+    public function actionProduce(){
+
+        $topic_name = 'jinglin_test2';//如果该topic不存在，则会创建一个partition为0的topic
+
+        $kafka = new ComKafka($topic_name,'producer','kafka_local');
+        for ($i=0; $i < 10000; $i++) { 
+            $msg = 'message:'.$i;
+            $kafka -> produce($msg);//指定partition_id(int)发送,需>=0且存在该partition
+        }
+        //$kafka -> produce($msg);//默认，一次链接中随机发送到各partition
+        //$kafka -> produce($msg,$partition_id);//指定partition_id(int)发送,需>=0且存在该partition
+        //$kafka -> produce($msg,ComKafka::PRODUCER_PARTITION_MODE_CONSISTENT,$key);//使用consistent hashing算法进行发送，相同key下保序
+
+
+    }
+    public function actionConsumer(){
+
+        $topic_name = 'jinglin_test2';
+
+        $kafka = new ComKafka($topic_name,'consumer','kafka_local');
+        while(true){
+            $res = $kafka -> consume();
+            if($res){
+                echo $res."\n";
+            }
+        }
+        // $res = $kafka -> consume();//若不指定partition，则消费全部
+        // $res = $kafka -> consume(0);//指定partition_id(int)，多进程情况下使用
+        // $res = $kafka -> consume(array(0,1,2));//指定多partition
+    }
+        
 
   @todo monitor class
 */
 class ComKafka{
 
-	CONST PRODUCER_PARTITION_MODE_CONSISTENT = -1;
-	CONST PRODUCER_PARTITION_MODE_RANDOM	 = -2;
+    CONST PRODUCER_PARTITION_MODE_CONSISTENT = -1;
+    CONST PRODUCER_PARTITION_MODE_RANDOM     = -2;
+    CONST PRODUCER_REQUEST_ACK               =  1;//-1所有replicas同步完成，0不发送响应，1only leader
 
-	CONST CONSUMER_MESSAGE_MAX_BYTES 		 = 1048576;
-	CONST CONSUMER_MESSAGE_FETCH_TIMEOUT_MS  = 1000;
+    CONST CONSUMER_MESSAGE_MAX_BYTES         = 1048576;
+    CONST OPERATE_TIMEOUT_MS  = 1000;
 
-	private $topic_name;
+    private $offset_path = "/Users/jinglinhu/Desktop/kafka-offset-data/";
 
-	private $producer;
-	private $producer_topic;
-	private $consumer_topic;
+    private $topic_name;
+    private $all_partitions;
 
-	function __construct($host_name,$topic_name,$identity){
+    private $producer;
+    private $producer_topic;
 
-		$host_conf = YII::app()->param($host_name);
+    private $consumer;
+    private $queue;
+    private $consumer_topic;
 
-		if($conf == '' || $topic_name  == '' || $identity  == ''){
-			echo "error : no init param";
-			exit;
-		}
+    function __construct($topic_name,$identity,$host_name="kafka"){
 
-		if(!in_array($identity,array('producer','consumer'))){
-			echo "error : wrong identity";
-			exit;
-		}
+        $conf = YII::app()->params[$host_name];
 
-		$this->topic_name = $topic_name;
+        if($conf == '' || $topic_name  == '' || $identity  == ''){
+            echo "error : no init param";
+            exit;
+        }
 
-		//初始化全局配置
-		$rd_conf = new RdKafka\Conf();
-		$rd_conf -> set('metadata.broker.list',$host_conf);
-		$rd_conf -> set('socket.keepalive.enable',true);
-		$rd_conf -> set('log_level',LOG_DEBUG);//Logging level (syslog(3) levels)
+        if(!in_array($identity,array('producer','consumer'))){
+            echo "error : wrong identity";
+            exit;
+        }
+        $this->topic_name = $topic_name;
 
-		switch ($identity) {
+        //初始化全局配置
+        $rd_conf = new RdKafka\Conf();
+        $rd_conf -> set('metadata.broker.list',$conf['host']);
+        #$rd_conf -> set('socket.keepalive.enable',true);
+        #$rd_conf -> set('log_level',LOG_DEBUG);//Logging level (syslog(3) levels)
+        //print_r($rd_conf->dump());exit;
+        switch ($identity) {
+            case 'producer':
+                $rd_conf -> set('compression.codec','none');//Compression codec to use for compressing message sets: none, gzip or snappy;default none
+                $this->producer = new RdKafka\Producer($rd_conf);
+                break;
 
-			case 'producer':
-				$rd_conf -> set('compression.codec','none');//Compression codec to use for compressing message sets: none, gzip or snappy;default none
-				$this->producer = new RdKafka\Producer($rd_conf);
-				break;
+            case 'consumer':
 
-			case 'consumer':
-				$rd_conf -> set('fetch.message.max.bytes',self::CONSUMER_MESSAGE_MAX_BYTES);
-				$rd_consumer = new RdKafka\Consumer($rd_conf);
+                $rd_conf -> set('fetch.message.max.bytes',self::CONSUMER_MESSAGE_MAX_BYTES);
+                $this->consumer = new RdKafka\Consumer($rd_conf);
 
-				$rd_topic_conf = new RdKafka\TopicConf();
-				$rd_topic_conf -> set('group.id','????');//@todo
-				$rd_topic_conf -> set('auto.offset.reset','smallest');
-				$rd_topic_conf -> set('offset.store.method','broker');//flie(offset.store.path),broker
-				$rd_topic_conf -> set('auto.commit.interval.ms',1000);
-				$rd_topic_conf -> set('offset.store.sync.interval.ms',60000);//fsync() interval for the offset file, in milliseconds. Use -1 to disable syncing, and 0 for immediate sync after each write.
+                $rd_topic_conf = new RdKafka\TopicConf();
 
-				$this->consumer_topic = $rd_consumer->newTopic($topic_name,$rd_topic_conf);
-				$this->consumer_topic -> consumeStart($partition, RD_KAFKA_OFFSET_STORED);//RD_KAFKA_OFFSET_STORED
-				break;
-		}
+                $back=debug_backtrace();
+                $back=$back[1];
+                $group = $this->topic_name."_".$back['class']."_".$back['function'];
 
-	}
+                $rd_topic_conf -> set('group.id',$group);
+                $rd_topic_conf -> set('auto.commit.interval.ms',1000);
+                $rd_topic_conf -> set("offset.store.path", $this->offset_path);
+                $rd_topic_conf -> set('auto.offset.reset','smallest');
+                //$rd_topic_conf -> set('offset.store.method','broker');//flie(offset.store.path),broker
+                //$rd_topic_conf -> set('offset.store.sync.interval.ms',60000);//fsync() interval for the offset file, in milliseconds. Use -1 to disable syncing, and 0 for immediate sync after each write.
+
+                $this->consumer_topic = $this->consumer->newTopic($topic_name,$rd_topic_conf);
+                break;
+        }
+
+    }
 
 //-----------------------------------produce start-----------------------------------
 
-	public function produce($message, $partition = self::PRODUCER_PARTITION_MODE_RANDOM , $key = null){
+    public function produce($message, $partition = self::PRODUCER_PARTITION_MODE_RANDOM , $key = null){
 
-		if(!isset($this->produce) || trim($message) == '' || !is_numeric($partition) || $partition < -2 ){
-			echo "error : produce wrong param";
-			return false;
-		}
+        if(!isset($this->producer) || trim($message) == '' || !is_numeric($partition) || $partition < -2 ){
+            echo "error : produce wrong param";
+            return false;
+        }
+        try {
 
-		switch ($partition) {
-			//一致性hash发送消息
-			case self::PRODUCER_PARTITION_MODE_CONSISTENT:
-				if(isset($key) && $key !=''){
-					$this->getProducerTopic('consistent')-> produce(RD_KAFKA_PARTITION_UA, 0, $message,$key);
-				}else{
-					echo "error : produce no key";
-					return false;
-				}
-				break;
+            switch ($partition) {
+            //一致性hash发送消息
+            case self::PRODUCER_PARTITION_MODE_CONSISTENT:
+                if(isset($key) && $key !=''){
+                   $this->setProducerTopic('consistent');
+                   $this->producer_topic-> produce(RD_KAFKA_PARTITION_UA, 0, $message,$key);
+                }else{
+                    echo "error : produce no key";
+                    exit;
+                }
+                break;
 
-			//随机发送
-			case self::PRODUCER_PARTITION_MODE_RANDOM:
-				 $this->getProducerTopic()-> produce(RD_KAFKA_PARTITION_UA, 0, $message,$key);
-				break;
-			
-			//指定partition发送
-			default:
-				$this->getProducerTopic()-> produce($partition, 0, $message,$key);
-				break;
-		}
+            //随机发送
+            case self::PRODUCER_PARTITION_MODE_RANDOM:
 
-		return true;
-	}
+                $this->setProducerTopic();
+                $this->producer_topic-> produce(RD_KAFKA_PARTITION_UA, 0, $message);
+                break;
+            //指定partition发送
+            default:
+                $this->setProducerTopic();
 
-	private function getProducerTopic($mode = ''){
+                $this->setPartitions($this->producer,$this->producer_topic);
 
-		if(!$this->producer_topic){
-			if(!isset($this->producer)){
-				echo "error : produce wrong identity";
-				exit;
-			}
-			if($mode == 'consistent'){
-				$rd_topic_conf = new RdKafka\TopicConf();
-				$rd_topic_conf -> setPartitioner(RD_KAFKA_MSG_PARTITIONER_CONSISTENT);
-				$this->producer_topic = $this->producer->newTopic($this->topic_name,$rd_topic_conf);
-			}else{
-				$this->producer_topic = $this->producer->newTopic($this->topic_name);
-			}
-		}
-		return $this->producer_topic;
-	}
+                if(!in_array($partition,$this->all_partitions,true)){
+                    echo "error : produce no partition ".$partition." in ".$this->topic_name." (".implode(",",$this->all_partitions).") ";
+                    exit;
+                }
+                $this->producer_topic -> produce($partition, 0, $message);
+                break;
+            }
+
+        } catch (Exception $e) {
+            echo $e->getMessage();
+            return false;
+        }
+        return true;
+    }
+
+    private function setProducerTopic($mode = ''){
+
+        if(!$this->producer_topic){
+            if(!isset($this->producer)){
+                echo "error : produce wrong identity";
+                exit;
+            }
+            $rd_topic_conf = new RdKafka\TopicConf();
+
+            $rd_topic_conf->set("request.required.acks", self::PRODUCER_REQUEST_ACK); 
+
+            if($mode == 'consistent'){
+
+                $rd_topic_conf -> setPartitioner(RD_KAFKA_MSG_PARTITIONER_CONSISTENT);
+            }
+            //print_r($rd_topic_conf->dump());exit;
+            $this->producer_topic = $this->producer->newTopic($this->topic_name,$rd_topic_conf);
+
+        }
+    }
 //-----------------------------------produce end-----------------------------------
 
 
 //-----------------------------------consume start-----------------------------------
 
-	//@todo 存储方式：local_file，broker，zk
-	public function consume($partition){
+    //@todo 存储方式：zk
+    public function consume($partition=null){
 
-		if(!isset($this->consumer_topic) || !is_numeric($partition)  || $partition < 0){
-			echo "error : consume wrong param";
-			return false;
-		}
-		$msg = $this->consumer_topic->consume($partition, self::CONSUMER_MESSAGE_FETCH_TIMEOUT_MS);
+        if(!isset($this->consumer_topic) || !isset($this->consumer)){
+            echo "error : consume wrong";
+            return false;
+        }
 
-		if ($msg->err) {
-			echo "error : consumer ". $msg->errstr();
-	        return false;
-	    } else {
-	        retrun $msg->payload;
-	    }
-	}	
+        $this->setQueue($partition);
+
+        $msg = $this->queue->consume(self::OPERATE_TIMEOUT_MS);
+
+        if(isset($msg)){
+            if ($msg->err != 0 ) {
+                echo "topic[$msg->topic_name] - partition[$msg->partition] - offset[$msg->offset] : msg-".$msg->errstr()."\n";
+                return false;
+            }
+            echo "topic[$msg->topic_name] - partition[$msg->partition] - offset[$msg->offset] : msg-";
+            return $msg->payload;
+        }
+    }   
+
+    private function setQueue($partition){
+
+        if(!$this->queue){
+            $this->queue = $this->consumer -> newQueue();
+
+            $this->setPartitions($this->consumer,$this->consumer_topic);
+
+            if(is_numeric($partition) && $partition >= 0){
+               $partition = array($partition);
+            }
+
+            if(is_array($partition)){
+
+                foreach ($partition as $p) {
+                    if(!in_array($p,$this->all_partitions,true)){
+                        echo "error : consume no partition ".$partition." in ".$this->topic_name." (".implode(",",$this->all_partitions).") ";
+                        exit;
+                    }
+                }
+                $consume_partitions = $partition;
+
+            }else{
+
+                $consume_partitions = $this->all_partitions;
+
+            }
+            foreach ($consume_partitions as  $p) {
+                $this->consumer_topic -> consumeQueueStart($p, RD_KAFKA_OFFSET_STORED,$this->queue);//RD_KAFKA_OFFSET_STORED
+            }
+
+        }
+    }
 
 //-----------------------------------consume end-----------------------------------
 
+
+//-----------------------------------public start-----------------------------------
+
+    private function setPartitions($kd_obj,$topic_obj){
+
+        if(!$this->all_partitions){
+            if(!isset($topic_obj) || !isset($kd_obj)){
+                echo "error : get partitions wrong";
+                exit;
+            }
+           
+            $metadata = $kd_obj->metadata(false,$topic_obj,self::OPERATE_TIMEOUT_MS)->getTopics();
+            $this->all_partitions =array();
+            foreach ($metadata as $topic) {
+                foreach ($topic->getPartitions() as $k => $p) {
+                    $this->all_partitions[] = $p->getId();
+                }
+            }
+        }
+    }   
+
+//-----------------------------------public end-----------------------------------
 }
 
 ?>
