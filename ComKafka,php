@@ -4,7 +4,7 @@
   php-rdkafka基于kafka c++ library(https://github.com/edenhill/librdkafka)
 
   example:
-
+ 
     public function actionProduce(){
 
         $topic_name = 'jinglin_test2';//如果该topic不存在，则会创建一个partition为0的topic
